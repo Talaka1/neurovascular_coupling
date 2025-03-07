@@ -1,0 +1,8 @@
+numpy
+scipy
+matplotlib
+mne
+pandas
+scikit-learn
+pactools
+python-dotenv

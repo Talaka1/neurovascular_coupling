@@ -1,0 +1,18 @@
+{
+  "folders": [
+    {
+      "name": "neurovascular_coupling",
+      "path": "."
+    },
+    {
+      "name": "old_scripts",
+      "path": "/home/lennart/Documents/DoktorarbeitEEGfNIRS"
+    }
+  ],
+  "settings": {
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": true,
+    "editor.formatOnSave": true,
+    "python.analysis.extraPaths": ["${workspaceFolder:neurovascular_coupling}"]
+  }
+}
