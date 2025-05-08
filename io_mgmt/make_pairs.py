@@ -8,6 +8,8 @@
 # add description of pair (can use standard descritions from config file TODO)
 # save pair to raw_eeg_fnirs_pairs.txt in config
 
+from config.data_paths_and_config import PROJECT_ROOT
+
 def scan_for_matching_ids(path_eeg, path_fnirs, id_pattern=None):
     """
     Scan for matching IDs of subfolders in the EEG and fNIRS folders.
@@ -368,17 +370,368 @@ def make_pairs(datasets, auto_match_single=False):
     # Return all created pairs
     return created_pairs
 
-def write_pair_loc_description(path_eeg_file, path_fnirs_file, type_eeg, type_fnirs, description):
-    # write path to eeg and fnirs file and description to raw_eeg_fnirs_pairs.txt
-    return
+def write_pair_loc_description(pairs, subject_id=None, output_file=None, manual_inputs=None):
+    """
+    Add descriptions to EEG-fNIRS pairs and save them to the raw_pairs_db.json database.
+    
+    Parameters
+    ----------
+    pairs : list
+        List of dictionaries with paired EEG and fNIRS paths
+        Format: [{'eeg_path': '/path/to/eeg', 'fnirs_path': '/path/to/fnirs'}, ...]
+    subject_id : str, optional
+        Subject ID for these pairs. If None, attempts to extract from filenames.
+    output_file : str, optional
+        Path to the JSON database file. If None, uses default location.
+    manual_inputs : list, optional
+        List of previously used manual settings, each a complete settings dict
+        Format: [{'type': 'motor tapping', 'fields': {'hand': 'L', ...}}, ...]
+        
+    Returns
+    -------
+    list
+        The manual inputs used, as a flat list for reuse in future calls
+    """
+    import os
+    import json
+    import re
+    from datetime import datetime
+    
+    # Set up output file path
+    try:
+        from config.data_paths_and_config import PROJECT_ROOT
+        output_file = output_file or os.path.join(PROJECT_ROOT, "config", "raw_pairs_db.json")
+        print("found config file")
+    except ImportError:
+        if output_file is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            output_file = os.path.join(script_dir, '..', 'config', 'raw_pairs_db.json')
+        print("could not find config file")
 
+    print(f"Output file for pairs: {output_file}")
+    
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    
+    # Load templates
+    try:
+        # Add workspace root to Python path so "config" can be found
+        import sys
+        import os
+        
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        workspace_root = os.path.dirname(script_dir) 
+        
+        if workspace_root not in sys.path:
+            sys.path.insert(0, workspace_root)
+            print(f"Added workspace root to Python path: {workspace_root}")
+        
+        import config.data_descriptions as desc_config
+        print("Loaded metadata templates from data_descriptions.py")
+        
+        templates = {}
+        for name in dir(desc_config):
+            if name.endswith('_METADATA') and isinstance(getattr(desc_config, name), dict):
+                obj = getattr(desc_config, name)
+                if all(k in obj for k in ['type', 'auto', 'manual']):
+                    type_value = obj['type'] 
+                    if not isinstance(type_value, str):
+                        print(f"Warning: Template '{name}' has a 'type' field that is not a string. Skipping.")
+                        continue
+                    templates[type_value] = obj
+                    print(f"Found template: {type_value}")
+        
+        if not templates:
+            print("Warning: No valid metadata templates found in data_descriptions.py")
+            templates = {
+                'default': {
+                    'type': 'default',
+                    'auto': {'subject': '', 'date_added_to_db': ''}, # Ensure these are present for fallback
+                    'manual': {'description': ''}
+                }
+            }
+    except ImportError:
+        print("Could not import metadata templates. Using a basic template.")
+        templates = {
+            'default': {
+                'type': 'default',
+                'auto': {'subject': '', 'date_added_to_db': ''}, # Ensure these are present for fallback
+                'manual': {'description': ''}
+            }
+        }
+    
+    # Load existing database if it exists
+    existing_pairs = []
+    if os.path.exists(output_file):
+        try:
+            with open(output_file, 'r') as f:
+                data = json.load(f)
+                existing_pairs = data.get('pairs', [])
+                print(f"Loaded {len(existing_pairs)} existing pairs from database")
+        except (json.JSONDecodeError, FileNotFoundError):
+            print(f"Warning: Could not read existing file {output_file}, starting with empty database")
+    
+    # Check for duplicates
+    used_eeg_paths = set()
+    used_fnirs_paths = set()
+    
+    # First, collect all previously used paths from the database
+    for existing_pair in existing_pairs:
+        used_eeg_paths.add(existing_pair.get('eeg_path'))
+        used_fnirs_paths.add(existing_pair.get('fnirs_path'))
+    
+    # Now check for duplicates in the current batch itself
+    duplicate_check = {}
+    for i, pair in enumerate(pairs):
+        eeg_path = pair['eeg_path']
+        fnirs_path = pair['fnirs_path']
+        
+        # Check if already used in existing database
+        if eeg_path in used_eeg_paths:
+            print(f"\nWARNING: EEG file already exists in database: {os.path.basename(eeg_path)}")
+            duplicate_check[i] = True
+        
+        if fnirs_path in used_fnirs_paths:
+            print(f"\nWARNING: fNIRS file already exists in database: {os.path.basename(fnirs_path)}")
+            duplicate_check[i] = True
+        
+        # Also check if used multiple times in current batch
+        for j, other_pair in enumerate(pairs):
+            if i != j:  # Don't compare with self
+                if eeg_path == other_pair['eeg_path']:
+                    print(f"\nWARNING: EEG file used multiple times in current batch: {os.path.basename(eeg_path)}")
+                    duplicate_check[i] = True
+                
+                if fnirs_path == other_pair['fnirs_path']:
+                    print(f"\nWARNING: fNIRS file used multiple times in current batch: {os.path.basename(fnirs_path)}")
+                    duplicate_check[i] = True
+    
+    # If any duplicates were found, ask user whether to continue
+    if duplicate_check:
+        print(f"\nFound {len(duplicate_check)} pairs with duplicate files.")
+        print("Do you want to continue and add descriptions for non-duplicated pairs? (y/n)")
+        response = input("> ").strip().lower()
+        if response != 'y':
+            print("Operation cancelled by user.")
+            return manual_inputs or []
+    
+    # Initialize manual_inputs if not provided
+    if manual_inputs is None:
+        manual_inputs = []
+    
+    # Keep track of processed pairs
+    pairs_with_descriptions = []
+    
+    # Process each valid pair
+    for i, pair in enumerate(pairs):
+        # Skip duplicates
+        if duplicate_check.get(i):
+            continue
+            
+        eeg_path = pair['eeg_path']
+        fnirs_path = pair['fnirs_path']
+        eeg_name = os.path.basename(eeg_path)
+        fnirs_name = os.path.basename(fnirs_path)
+        
+        print(f"\nProcessing Pair {i+1}:")
+        print(f"  EEG: {eeg_name}")
+        print(f"  fNIRS: {fnirs_name}")
+        
+        # Always let user select the task type
+        print("\nSelect task type:")
+        task_types = list(templates.keys())
+        for idx, task_name in enumerate(task_types, 1):
+            # task_name is already the string type identifier (e.g., 'motor tapping')
+            print(f"  {idx}: {task_name}")
+        
+        # Get task type selection
+        while True:
+            choice = input("> ").strip()
+            try:
+                index = int(choice) - 1
+                if 0 <= index < len(task_types):
+                    selected_task_type_key = task_types[index] # This is the key for the templates dict
+                    metadata_template = templates[selected_task_type_key]
+                    break
+                else:
+                    print(f"Please enter a number between 1 and {len(task_types)}")
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+        
+        # Get the actual type name from the template (it's just the 'type' field value)
+        type_name = metadata_template['type'] 
+        
+        # Check if we have previous manual inputs to offer
+        use_previous = False
+        selected_setting = None
+        
+        if manual_inputs:
+            print("\nPrevious settings available:")
+            for idx, setting in enumerate(manual_inputs, 1):
+                # Show the task type and a summary of the settings
+                print(f"  {idx}: {setting['type']} - ", end="")
+                # Display a summary of fields (e.g., "hand: L, device: button")
+                field_preview = ", ".join([f"{k}: {v}" for k, v in setting['fields'].items()][:3])
+                if len(setting['fields']) > 3:
+                    field_preview += ", ..."
+                print(field_preview)
+            
+            # Add option to create new settings
+            print(f"  {len(manual_inputs)+1}: Create new settings")
+            
+            # Get user selection
+            while True:
+                choice = input("\nSelect settings to use or create new: ").strip()
+                try:
+                    index = int(choice) - 1
+                    if 0 <= index < len(manual_inputs):
+                        selected_setting = manual_inputs[index]
+                        use_previous = True
+                        print(f"Using settings #{index+1}")
+                        break
+                    elif index == len(manual_inputs):
+                        # Create new settings
+                        use_previous = False
+                        break
+                    else:
+                        print(f"Please enter a number between 1 and {len(manual_inputs)+1}")
+                except ValueError:
+                    print("Invalid input. Please enter a number.")
+        else:
+            # No previous settings available
+            use_previous = False
+        
+        # Create metadata structure
+        metadata = {
+            'type': metadata_template['type'],
+            'auto': {}, # Initialize auto metadata
+            'manual': {}
+        }
+        
+        # Auto-fill automatic fields based on the template
+        # This will now include 'subject' and 'date_added_to_db' as defined in data_descriptions.py
+        for field_key in metadata_template['auto']:
+            if field_key == 'subject':
+                # Determine the subject ID
+                current_subject_id = "unknown"
+                if subject_id:  # Use subject_id passed to the function (batch-level)
+                    current_subject_id = subject_id
+                elif metadata_template['auto'][field_key] == 'synthetic': # Handle synthetic case
+                    current_subject_id = 'synthetic'
+                else: # Try to infer from filename if not synthetic and no batch ID
+                    subject_match_eeg = re.search(r'(?:subject|sub|s)[-_]?([a-zA-Z0-9]+)', eeg_name, re.IGNORECASE)
+                    if subject_match_eeg:
+                        current_subject_id = subject_match_eeg.group(1)
+                    else:
+                        subject_match_fnirs = re.search(r'(?:subject|sub|s)[-_]?([a-zA-Z0-9]+)', fnirs_name, re.IGNORECASE)
+                        if subject_match_fnirs:
+                            current_subject_id = subject_match_fnirs.group(1)
+                metadata['auto'][field_key] = current_subject_id
+            elif field_key == 'date_added_to_db':
+                metadata['auto'][field_key] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S') # Date and time
+            else:
+                # For any other 'auto' fields defined in the template
+                metadata['auto'][field_key] = metadata_template['auto'][field_key]
+        
+        # Handle manual fields
+        if use_previous and selected_setting['type'] == type_name:
+            # Use the selected previous settings
+            for field, value in selected_setting['fields'].items():
+                if field in metadata_template['manual']:
+                    metadata['manual'][field] = value
+            
+            print("Using previous field values")
+        else:
+            # Get new values for each manual field
+            print("\nPlease provide the following information:")
+            for field, options in metadata_template['manual'].items():
+                if isinstance(options, list) and options:
+                    # Show options with numbers
+                    print(f"\nSelect {field.replace('_', ' ')}:")
+                    for j, option in enumerate(options, 1):
+                        print(f"  {j}: {option}")
+                    print(f"  {len(options)+1}: Custom (enter your own)")
+                    
+                    # Get selection
+                    while True:
+                        choice = input("> ").strip()
+                        try:
+                            choice_idx = int(choice) - 1
+                            if 0 <= choice_idx < len(options):
+                                value = options[choice_idx]
+                                break
+                            elif choice_idx == len(options):
+                                # Custom option
+                                print(f"Enter custom value for {field}:")
+                                value = input("> ").strip()
+                                break
+                            else:
+                                print(f"Please enter a number between 1 and {len(options)+1}")
+                        except ValueError:
+                            print("Invalid input. Please enter a number.")
+                else:
+                    # Free text field
+                    print(f"\nEnter {field.replace('_', ' ')}:")
+                    value = input("> ").strip()
+                
+                metadata['manual'][field] = value
+        
+        # Create the final pair entry
+        pair_with_desc = {
+            'eeg_path': eeg_path,
+            'fnirs_path': fnirs_path,
+            #'task_type': type_name,
+            'metadata': metadata # 'metadata.auto' now contains subject and date_added_to_db
+        }
+        
+        pairs_with_descriptions.append(pair_with_desc)
+        
+        # If we created new settings, store them for future use
+        if not use_previous:
+            # Store this as a new setting
+            new_setting = {
+                'type': type_name,
+                'fields': metadata['manual'].copy()
+            }
+            manual_inputs.append(new_setting)
+            print(f"Added new settings (#{len(manual_inputs)})")
+            print (f"\nManual inputs for future use: {manual_inputs}")
+    
+    # Save database
+    if pairs_with_descriptions:
+        # Add to existing pairs
+        existing_pairs.extend(pairs_with_descriptions)
+        
+        # Create full database structure
+        database = {
+            'last_updated': datetime.now().isoformat(),
+            'num_pairs': len(existing_pairs),
+            'pairs': existing_pairs
+        }
+        
+        # Write to file
+        with open(output_file, 'w') as f:
+            json.dump(database, f, indent=2)
+        
+        print(f"\nSaved {len(pairs_with_descriptions)} new pairs to {output_file}")
+    else:
+        print("\nNo new pairs to save")
+    
+    # Return all manual inputs for future use
+    
+    return manual_inputs
 
 matching_ids, missing_eeg_ids, missing_fnirs_ids = scan_for_matching_ids(path_eeg = '/home/lennart/Desktop/Motor Task Subjects/EEG', path_fnirs = '/home/lennart/Desktop/Motor Task Subjects/fNIRS/NIRX', id_pattern=None)
-#print(matching_ids, missing_eeg_ids, missing_fnirs_ids)
-# Get the first ID from the matching_ids dictionary
-first_id = list(matching_ids.keys())[0]
-datasets = list_datasets_per_id(matching_ids[first_id], type_eeg='.fif', type_fnirs='.wl1', recursive=True, return_folders_eeg=False, return_folders_fnirs=True)
-#print(datasets)
-pairs = make_pairs(datasets)
-print(pairs)
+
+if matching_ids: 
+    first_id = list(matching_ids.keys())[0]
+    datasets = list_datasets_per_id(matching_ids[first_id], type_eeg='.fif', type_fnirs='.wl1', recursive=True, return_folders_eeg=False, return_folders_fnirs=True)
+    pairs = make_pairs(datasets)
+    print(pairs)
+
+    if pairs:
+        write_pair_loc_description(pairs, subject_id=first_id)
+else:
+    print("No matching subject IDs found. Cannot proceed with pairing.")
+
 
