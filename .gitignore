@@ -1,2 +1,3 @@
 # Workspace settings (specific to your local setup)
 *.code-workspace
+config/raw_pairs_db.json
